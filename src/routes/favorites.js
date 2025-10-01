@@ -7,7 +7,6 @@ const { AppError, catchAsync } = require('../middleware/errorHandler');
 const { authenticateToken } = require('../middleware/auth');
 const logger = require('../utils/logger');
 
-// Validation middleware for adding favorites
 const validateFavoriteProduct = [
   body('stkno')
     .trim()
@@ -48,44 +47,30 @@ const validateFavoriteProduct = [
 
 // ===============================
 // GET /api/favorites
-// Get user's favorite products
 // ===============================
 router.get('/', authenticateToken, catchAsync(async (req, res) => {
   const userHesap = req.user.hesap;
 
   logger.request(req, `Fetching favorites for user: ${userHesap}`);
 
-  try {
-    const favorites = await FavoriteProduct.getFavoritesByUser(userHesap);
+  const favorites = await FavoriteProduct.getFavoritesByUser(userHesap);
 
-    logger.info('Favorites fetched successfully', {
-      userHesap,
-      favoriteCount: favorites.length,
-      requestId: req.id
-    });
+  logger.info('Favorites fetched successfully', {
+    userHesap,
+    favoriteCount: favorites.length,
+    requestId: req.id
+  });
 
-    res.json({
-      success: true,
-      data: favorites
-    });
-
-  } catch (error) {
-    logger.error('Failed to fetch favorites:', {
-      userHesap,
-      error: error.message,
-      requestId: req.id
-    });
-
-    throw new AppError('Failed to fetch favorites', 500);
-  }
+  res.json({
+    success: true,
+    data: favorites
+  });
 }));
 
 // ===============================
 // POST /api/favorites
-// Add product to favorites
 // ===============================
 router.post('/', authenticateToken, validateFavoriteProduct, catchAsync(async (req, res) => {
-  // Check validation results
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
     return res.status(400).json({
@@ -96,61 +81,49 @@ router.post('/', authenticateToken, validateFavoriteProduct, catchAsync(async (r
   }
 
   const userHesap = req.user.hesap;
+  const userPriceList = req.user.list || 1;
   const productData = req.body;
 
-  logger.request(req, `Adding product to favorites: ${productData.stkno}, user: ${userHesap}`);
+  logger.request(req, `Adding product to favorites: ${productData.stkno}, user: ${userHesap}, priceList: ${userPriceList}`);
 
-  try {
-    // Check if product is already in favorites
-    const existingFavorite = await FavoriteProduct.findOne({
-      userHesap,
-      stkno: productData.stkno,
-      isActive: true
+  const existingFavorite = await FavoriteProduct.findOne({
+    user: userHesap,
+    stkno: productData.stkno
+  });
+
+  if (existingFavorite) {
+    return res.status(409).json({
+      success: false,
+      message: 'Product is already in favorites',
+      data: existingFavorite
     });
-
-    if (existingFavorite) {
-      return res.status(409).json({
-        success: false,
-        message: 'Product is already in favorites',
-        data: existingFavorite.toClientJSON()
-      });
-    }
-
-    // Add to favorites
-    const favorite = await FavoriteProduct.addToFavorites(userHesap, productData);
-
-    logger.info('Product added to favorites successfully', {
-      userHesap,
-      stkno: productData.stkno,
-      productName: productData.stokadi,
-      requestId: req.id
-    });
-
-    res.status(201).json({
-      success: true,
-      message: 'Product added to favorites successfully',
-      data: favorite.toClientJSON()
-    });
-
-  } catch (error) {
-    logger.error('Failed to add product to favorites:', {
-      userHesap,
-      stkno: productData.stkno,
-      error: error.message,
-      requestId: req.id
-    });
-
-    if (error.message.includes('already in favorites')) {
-      throw new AppError('Product is already in favorites', 409);
-    }
-
-    throw new AppError('Failed to add product to favorites', 500);
   }
+
+  // Kullanıcının fiyat listesi bilgisini ekle
+  const favoriteData = {
+    ...productData,
+    userPriceList
+  };
+
+  const favorite = await FavoriteProduct.addToFavorites(userHesap, favoriteData);
+
+  logger.info('Product added to favorites successfully', {
+    userHesap,
+    userPriceList,
+    stkno: productData.stkno,
+    productName: productData.stokadi,
+    requestId: req.id
+  });
+
+  res.status(201).json({
+    success: true,
+    message: 'Product added to favorites successfully',
+    data: favorite
+  });
 }));
 
 // ===============================
 // DELETE /api/favorites/:stkno
-// Remove product from favorites
 // ===============================
 router.delete('/:stkno', authenticateToken, catchAsync(async (req, res) => {
   const { stkno } = req.params;
@@ -162,43 +135,30 @@ router.delete('/:stkno', authenticateToken, catchAsync(async (req, res) => {
 
   logger.request(req, `Removing product from favorites: ${stkno}, user: ${userHesap}`);
 
-  try {
-    const removedFavorite = await FavoriteProduct.removeFromFavorites(userHesap, stkno);
+  const removedFavorite = await FavoriteProduct.removeFromFavorites(userHesap, stkno);
 
-    if (!removedFavorite) {
-      return res.status(404).json({
-        success: false,
-        message: 'Product not found in favorites'
-      });
-    }
-
-    logger.info('Product removed from favorites successfully', {
-      userHesap,
-      stkno,
-      productName: removedFavorite.stokadi,
-      requestId: req.id
+  if (!removedFavorite) {
+    return res.status(404).json({
+      success: false,
+      message: 'Product not found in favorites'
     });
-
-    res.json({
-      success: true,
-      message: 'Product removed from favorites successfully'
-    });
-
-  } catch (error) {
-    logger.error('Failed to remove product from favorites:', {
-      userHesap,
-      stkno,
-      error: error.message,
-      requestId: req.id
-    });
-
-    throw new AppError('Failed to remove product from favorites', 500);
   }
+
+  logger.info('Product removed from favorites successfully', {
+    userHesap,
+    stkno,
+    productName: removedFavorite.stokadi,
+    requestId: req.id
+  });
+
+  res.json({
+    success: true,
+    message: 'Product removed from favorites successfully'
+  });
 }));
 
 // ===============================
 // POST /api/favorites/check
-// Check if products are in favorites (bulk check)
 // ===============================
 router.post('/check', authenticateToken, catchAsync(async (req, res) => {
   const { stknoList } = req.body;
@@ -214,71 +174,45 @@ router.post('/check', authenticateToken, catchAsync(async (req, res) => {
 
   logger.request(req, `Checking favorites for ${stknoList.length} products, user: ${userHesap}`);
 
-  try {
-    const favorites = await FavoriteProduct.find({
-      userHesap,
-      stkno: { $in: stknoList },
-      isActive: true
-    }, 'stkno').lean();
+  const favorites = await FavoriteProduct.find({
+    user: userHesap,
+    stkno: { $in: stknoList }
+  }, 'stkno').lean();
 
-    const favoriteStockNumbers = favorites.map(f => f.stkno);
-    
-    const result = stknoList.map(stkno => ({
-      stkno,
-      isFavorite: favoriteStockNumbers.includes(stkno)
-    }));
+  const favoriteStockNumbers = favorites.map(f => f.stkno);
+  
+  const result = stknoList.map(stkno => ({
+    stkno,
+    isFavorite: favoriteStockNumbers.includes(stkno)
+  }));
 
-    logger.info('Favorite check completed', {
-      userHesap,
-      checkedProducts: stknoList.length,
-      foundFavorites: favoriteStockNumbers.length,
-      requestId: req.id
-    });
+  logger.info('Favorite check completed', {
+    userHesap,
+    checkedProducts: stknoList.length,
+    foundFavorites: favoriteStockNumbers.length,
+    requestId: req.id
+  });
 
-    res.json({
-      success: true,
-      data: result
-    });
-
-  } catch (error) {
-    logger.error('Failed to check favorites:', {
-      userHesap,
-      productCount: stknoList.length,
-      error: error.message,
-      requestId: req.id
-    });
-
-    throw new AppError('Failed to check favorites', 500);
-  }
+  res.json({
+    success: true,
+    data: result
+  });
 }));
 
 // ===============================
 // GET /api/favorites/count
-// Get favorite products count
 // ===============================
 router.get('/count', authenticateToken, catchAsync(async (req, res) => {
   const userHesap = req.user.hesap;
 
-  try {
-    const count = await FavoriteProduct.countDocuments({
-      userHesap,
-      isActive: true
-    });
+  const count = await FavoriteProduct.countDocuments({
+    user: userHesap
+  });
 
-    res.json({
-      success: true,
-      data: { count }
-    });
-
-  } catch (error) {
-    logger.error('Failed to get favorites count:', {
-      userHesap,
-      error: error.message,
-      requestId: req.id
-    });
-
-    throw new AppError('Failed to get favorites count', 500);
-  }
+  res.json({
+    success: true,
+    data: { count }
+  });
 }));
 
 module.exports = router;

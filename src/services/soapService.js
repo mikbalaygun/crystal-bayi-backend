@@ -9,7 +9,6 @@ class SoapService {
     this.endpoint = process.env.SOAP_KRISTAL_ENDPOINT;
   }
 
-  // Create SOAP client with error handling and retry logic
   async createClient() {
     try {
       if (!this.client) {
@@ -23,6 +22,11 @@ class SoapService {
         this.client.setEndpoint(this.endpoint);
 
         logger.info('✅ SOAP client created successfully');
+        logger.info('📋 Available SOAP methods:', {
+          methods: Object.keys(this.client).filter(key =>
+            typeof this.client[key] === 'function' && !key.startsWith('_')
+          )
+        });
       }
 
       return this.client;
@@ -33,26 +37,20 @@ class SoapService {
     }
   }
 
-  // Generic SOAP operation wrapper with error handling
   async callSoapMethod(methodName, params = {}, retries = 3) {
     let lastError;
 
     for (let attempt = 1; attempt <= retries; attempt++) {
       try {
         const client = await this.createClient();
-
         logger.soap(`Calling ${methodName} (attempt ${attempt})`, params);
-
         const result = await client[methodName + 'Async'](params);
-
         logger.info(`✅ SOAP ${methodName} successful`, {
           method: methodName,
           attempt,
           hasResult: !!result
         });
-
         return result;
-
       } catch (error) {
         lastError = error;
         logger.error(`❌ SOAP ${methodName} failed (attempt ${attempt}):`, {
@@ -61,29 +59,19 @@ class SoapService {
           attempt,
           params
         });
-
-        // Reset client on error for next attempt
         this.client = null;
-
-        // Don't retry on authentication errors
         if (error.message.includes('authentication') || error.message.includes('login')) {
           break;
         }
-
-        // Wait before retry (exponential backoff)
         if (attempt < retries) {
           await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
         }
       }
     }
-
     throw new AppError(`SOAP ${methodName} failed: ${lastError?.message || 'Unknown error'}`, 503);
   }
 
-  // ===============================
-  // AUTHENTICATION METHODS
-  // ===============================
-
+  // AUTHENTICATION
   async authenticateUser(username, password) {
     try {
       const result = await this.callSoapMethod('uuselogin', {
@@ -125,45 +113,55 @@ class SoapService {
     }
   }
 
-  // ===============================
-  // PRODUCT METHODS
-  // ===============================
-
-  async getProducts(userHesap, filters = {}) {
+  // PRODUCTS - slStoklist metodunu kaldırdık (artık kullanılmayacak)
+  
+  async getProductsWithAllPrices() {
     try {
-      const params = {
-        vhesap: userHesap,
-        vanagrup: filters.fgrp || '',
-        valtgrup: filters.fagrp === 'undefined' ? '' : (filters.fagrp || ''),
-        valtgrup2: filters.fatgrp === 'undefined' ? '' : (filters.fatgrp || '')
-      };
+      logger.info('Calling ikoStoklist (multi-price list)');
 
-      const result = await this.callSoapMethod('slStoklist', params);
+      const result = await this.callSoapMethod('ikoStoklist', {});
 
       if (!result || !result[0]) {
-        return [];
+        logger.error('❌ ikoStoklist returned empty result');
+        throw new AppError('ikoStoklist returned empty result', 500);
       }
 
-      const products = result[0]?.TTStok?.TTStokRow || [];
+      // TTStoklar içinde TTStoklarRow var (dikkat: "lar" ile bitiyor)
+      const products = result[0]?.TTStoklar?.TTStoklarRow || [];
+      const count = Array.isArray(products) ? products.length : (products ? 1 : 0);
 
-      logger.info(`Fetched ${products.length} products for user ${userHesap}`);
+      if (count === 0) {
+        logger.error('❌ ikoStoklist returned 0 products');
+        throw new AppError('ikoStoklist returned 0 products', 500);
+      }
+
+      logger.info(`✅ ikoStoklist returned ${count} products with 15 price lists`);
+
+      if (count > 0) {
+        const firstProduct = Array.isArray(products) ? products[0] : products;
+        logger.info('Sample product from ikoStoklist:', {
+          stkno: firstProduct.stkno,
+          stokadi: firstProduct.stokadi,
+          hasPrices: !!(firstProduct.fiyat1 && firstProduct.fiyat2),
+          fiyat1: firstProduct.fiyat1,
+          fiyat15: firstProduct.fiyat15,
+          cinsi: firstProduct.cinsi
+        });
+      }
 
       return Array.isArray(products) ? products : [products];
 
     } catch (error) {
-      logger.error('Failed to fetch products:', error);
-      throw new AppError('Failed to fetch products', 500);
+      logger.error('❌ CRITICAL: Failed to fetch products with all prices:', error.message);
+      throw new AppError('Failed to fetch products with all prices', 500);
     }
   }
 
   async getProductGroups() {
     try {
       const result = await this.callSoapMethod('urungruplari', {});
-
       const groups = result[0]?.urungruplari?.urungruplariRow || [];
-
       return Array.isArray(groups) ? groups : [groups];
-
     } catch (error) {
       logger.error('Failed to fetch product groups:', error);
       throw new AppError('Failed to fetch product groups', 500);
@@ -172,14 +170,9 @@ class SoapService {
 
   async getSubGroups(groupId) {
     try {
-      const result = await this.callSoapMethod('altgrup', {
-        vgrup: groupId
-      });
-
+      const result = await this.callSoapMethod('altgrup', { vgrup: groupId });
       const subGroups = result[0]?.altgrup?.altgrupRow || [];
-
       return Array.isArray(subGroups) ? subGroups : [subGroups];
-
     } catch (error) {
       logger.error(`Failed to fetch sub groups for ${groupId}:`, error);
       throw new AppError('Failed to fetch sub groups', 500);
@@ -188,24 +181,16 @@ class SoapService {
 
   async getSubGroups2(groupId) {
     try {
-      const result = await this.callSoapMethod('altgrup2', {
-        vgrup: groupId
-      });
-
+      const result = await this.callSoapMethod('altgrup2', { vgrup: groupId });
       const subGroups = result[0]?.altgrup2?.altgrup2Row || [];
-
       return Array.isArray(subGroups) ? subGroups : [subGroups];
-
     } catch (error) {
       logger.error(`Failed to fetch sub groups2 for ${groupId}:`, error);
       throw new AppError('Failed to fetch sub groups2', 500);
     }
   }
 
-  // ===============================
-  // ORDER METHODS
-  // ===============================
-
+  // ORDERS
   async getOrders(userHesap, dateFilters = {}) {
     try {
       const params = {
@@ -213,25 +198,14 @@ class SoapService {
         vilktar: dateFilters.startDate || '',
         vsontar: dateFilters.endDate || ''
       };
-
       const result = await this.callSoapMethod('rsiparisler', params);
-
-      if (!result || !result[0]) {
-        return [];
-      }
-
+      if (!result || !result[0]) return [];
       const orders = result[0]?.TTsiparis?.TTsiparisRow || [];
-
       logger.info(`Fetched ${Array.isArray(orders) ? orders.length : 1} orders for user ${userHesap}`);
-
       return Array.isArray(orders) ? orders : [orders];
-
     } catch (error) {
       logger.error('Failed to fetch orders:', error);
-      // Don't throw error if no orders found
-      if (error.message.includes('TTsiparisRow')) {
-        return [];
-      }
+      if (error.message.includes('TTsiparisRow')) return [];
       throw new AppError('Failed to fetch orders', 500);
     }
   }
@@ -239,12 +213,11 @@ class SoapService {
   async createOrder(userHesap, products) {
     try {
       const moment = require('moment');
-
       const orderProducts = products.map(product => ({
-        wcinsi: product.cinsi || 'TL',
+        wcinsi: product.cinsi || 'TRY',  // ✅ TL yerine TRY
         wstkno: product.stkno,
         wsipmik: product.adet,
-        wsipfyt: product.fiyat,
+        wsipfyt: product.fiyat,  // Orijinal fiyat (orders.js'den geliyor)
         wtermin: moment().format('DD-MM-YYYY'),
         wsiptut: product.fiyat * product.adet,
         wacik: 'WEB',
@@ -256,15 +229,13 @@ class SoapService {
 
       const params = {
         vhesap: userHesap,
-        TTcreasip: {
-          TTcreasipRow: orderProducts
-        }
+        TTcreasip: { TTcreasipRow: orderProducts }
       };
 
       const result = await this.callSoapMethod('sipcrea', params);
-
-      logger.info(`Order created successfully for user ${userHesap}`, {
+      logger.info(`✅ Order created successfully for user ${userHesap}`, {
         productCount: products.length,
+        currencies: [...new Set(products.map(p => p.cinsi))],
         result
       });
 
@@ -273,44 +244,30 @@ class SoapService {
         orderId: result[0]?.sipno || 'Generated',
         message: 'Order created successfully'
       };
-
     } catch (error) {
-      logger.error('Failed to create order:', error);
+      logger.error('❌ Failed to create order:', error);
       throw new AppError('Failed to create order', 500);
     }
   }
 
-  // ===============================
-  // EXTRACT/STATEMENT METHODS
-  // ===============================
-
+  // EXTRACT
   async getExtract(userHesap, dateFilters = {}) {
     try {
       const moment = require('moment');
-
       const params = {
         vhesap: userHesap,
         vilktar: dateFilters.startDate || moment().startOf('year').format('DD-MM-YYYY'),
         vsontar: dateFilters.endDate || moment().format('DD-MM-YYYY')
       };
-
       const result = await this.callSoapMethod('dgeks', params);
-
       const extract = result[0]?.TTekstre?.TTekstreRow || [];
-
       return Array.isArray(extract) ? extract : [extract];
-
     } catch (error) {
       logger.error('Failed to fetch extract:', error);
       throw new AppError('Failed to fetch extract', 500);
     }
   }
 
-  /**
-+   * Ekstre DETAYI: ERP 'cardetstk' ve parametre 'vfkn' bekler.
-+   * @param {string|number} fkn - Fiş/Fatura anahtarı (wfkn)
-+   * @returns {Array} TTfkndetRow[] (tek kayıt dönerse diziye sarılır)
-+   */
   async getExtractDetail(fkn) {
     if (!fkn && fkn !== 0) {
       throw new AppError('Extract detail id (fkn) is required', 400);
@@ -324,29 +281,20 @@ class SoapService {
       throw new AppError('Failed to fetch extract detail', 500);
     }
   }
-  // ===============================
-  // CUSTOMER METHODS
-  // ===============================
 
+  // CUSTOMERS
   async getCustomers() {
     try {
       const result = await this.callSoapMethod('slCustlist', {});
-
       const customers = result[0]?.ttCust?.ttCustRow || [];
-
       return Array.isArray(customers) ? customers : [customers];
-
     } catch (error) {
       logger.error('Failed to fetch customers:', error);
       throw new AppError('Failed to fetch customers', 500);
     }
   }
 
-  // ===============================
-  // UTILITY METHODS
-  // ===============================
-
-  // Health check for SOAP service
+  // UTILITY
   async healthCheck() {
     try {
       await this.createClient();
@@ -360,12 +308,10 @@ class SoapService {
     }
   }
 
-  // Reset client connection
   resetConnection() {
     this.client = null;
     logger.info('SOAP client connection reset');
   }
 }
 
-// Export singleton instance
 module.exports = new SoapService();

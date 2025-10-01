@@ -3,52 +3,90 @@ const Product = require('../models/Product');
 const Category = require('../models/Category');
 const SyncCursor = require('../models/SyncCursor');
 const soapService = require('./soapService');
+const currencyService = require('./currencyService');
 const logger = require('../utils/logger');
 
-const SYNC_HESAP = process.env.SYNC_HESAP || '07748';
-
 function checksumOf(p) {
-  const base = `${p.stkno}|${p.stokadi}|${p.fiyat ?? p.fiy ?? ''}|${p.bakiye ?? ''}|${p.grupadi ?? ''}|${p.cinsi ?? ''}`;
+  const prices = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
+    .map(i => p[`fiyat${i}`] || 0)
+    .join('|');
+  const base = `${p.stkno}|${p.stokadi}|${prices}|${p.bakiye ?? ''}|${p.grupadi ?? ''}|${p.cinsi ?? ''}`;
   return crypto.createHash('md5').update(base).digest('hex');
 }
 
 async function fetchAllErpProducts() {
-  logger.info(`Fetching all products from ERP using sync account: ${SYNC_HESAP}`);
-  const list = await soapService.getProducts(SYNC_HESAP, {});
+  logger.info('Attempting to fetch products with ikoStoklist');
+  
+  const ikoProducts = await soapService.getProductsWithAllPrices();
+  
+  if (ikoProducts && ikoProducts.length > 0) {
+    logger.info(`Using ikoStoklist - got ${ikoProducts.length} products`);
+    return ikoProducts;
+  }
+  
+  logger.warn('ikoStoklist returned 0 products, falling back to slStoklist');
+  const list = await soapService.getProducts('07748', {});
+  
+  if (list.length > 0) {
+    logger.info('Sample product fields from slStoklist:', {
+      allFields: Object.keys(list[0]),
+      sampleProduct: list[0]
+    });
+  }
+  
   return Array.isArray(list) ? list : (list ? [list] : []);
 }
 
 async function upsertProducts(products = []) {
   if (!products.length) return { inserted: 0, updated: 0 };
 
-  const BATCH_SIZE = 500; // Küçük batch'ler halinde işle
+  logger.info('Getting currency rates for conversion...');
+  const usdRate = await currencyService.getRate('USD');
+  const eurRate = await currencyService.getRate('EUR');
+  
+  logger.info(`Using rates: USD=${usdRate}, EUR=${eurRate}`);
+
+  const BATCH_SIZE = 500;
   let totalInserted = 0;
   let totalUpdated = 0;
+  let currencyStats = { USD: 0, EUR: 0, TRY: 0 };
 
-  // Batch'ler halinde işle
   for (let i = 0; i < products.length; i += BATCH_SIZE) {
     const batch = products.slice(i, i + BATCH_SIZE);
     
     const ops = batch.map(p => {
-      const fiyat = Number(p.fiyat ?? p.fiy ?? 0);
       const bakiye = Number(p.bakiye ?? p.bky ?? p.stok ?? 0);
+      const currency = (p.cinsi?.trim().toUpperCase() || 'TRY');
       
-      // Para birimi field'ını kontrol et
-      let cinsi = 'TRY'; // Default değer
-      if (p.cinsi) {
-        // SOAP'tan gelen cinsi değerini temizle
-        const cleanCinsi = String(p.cinsi).trim().toUpperCase();
-        if (cleanCinsi && cleanCinsi !== '' && cleanCinsi !== 'NULL') {
-          cinsi = cleanCinsi;
+      // İstatistik
+      currencyStats[currency] = (currencyStats[currency] || 0) + 1;
+      
+      // Orijinal fiyatları sakla
+      const originalPriceList = {};
+      const priceList = {};
+      
+      for (let j = 1; j <= 15; j++) {
+        const originalPrice = Number(p[`fiyat${j}`] ?? 0);
+        originalPriceList[`fiyat${j}`] = originalPrice;
+        
+        // TL'ye çevir
+        let convertedPrice = originalPrice;
+        if (currency === 'USD') {
+          convertedPrice = originalPrice * usdRate;
+        } else if (currency === 'EUR') {
+          convertedPrice = originalPrice * eurRate;
         }
+        
+        priceList[`fiyat${j}`] = Math.round(convertedPrice * 100) / 100; // 2 ondalık
       }
       
       const doc = {
         stkno: p.stkno,
         stokadi: p.stokadi,
         grupadi: p.grupadi,
-        fiyat,
-        cinsi, // ← YENİ FIELD EKLENDİ
+        priceList,           // TL cinsinden fiyatlar
+        originalPriceList,   // Orijinal fiyatlar
+        cinsi: currency,
         bakiye,
         birim: p.birim || 'ADET',
         kdv: p.kdv || 18,
@@ -57,14 +95,23 @@ async function upsertProducts(products = []) {
         fagrp: p.fagrp || '',
         fatgrp: p.fatgrp || '',
         isActive: true,
-        checksum: checksumOf({ ...p, fiyat, bakiye }),
+        checksum: checksumOf(p),
         syncedAt: new Date(),
         _raw: p
       };
+      
       return {
         updateOne: {
           filter: { stkno: p.stkno },
-          update: { $set: doc },
+          update: { 
+            $set: doc,
+            // Image alanlarını sadece insert'te ekle, update'te dokunma
+            $setOnInsert: {
+              imageUrl: null,
+              imageSource: null,
+              imageSyncedAt: null
+            }
+          },
           upsert: true
         }
       };
@@ -82,22 +129,17 @@ async function upsertProducts(products = []) {
     }
   }
 
-  return {
-    inserted: totalInserted,
-    updated: totalUpdated
-  };
+  logger.info('Currency conversion statistics:', currencyStats);
+  return { inserted: totalInserted, updated: totalUpdated };
 }
 
 async function syncCategories() {
   logger.info('Starting category sync');
   
   try {
-    // Ana grupları çek
     const mainGroups = await soapService.getProductGroups();
-    
     const categoryOps = [];
     
-    // Ana grupları işle
     for (const group of mainGroups) {
       categoryOps.push({
         updateOne: {
@@ -117,7 +159,6 @@ async function syncCategories() {
         }
       });
       
-      // Alt grupları çek (level 2)
       try {
         const subGroups = await soapService.getSubGroups(group.grpkod);
         for (const subGroup of subGroups) {
@@ -139,7 +180,6 @@ async function syncCategories() {
             }
           });
           
-          // Alt gruplar2 çek (level 3)
           try {
             const subGroups2 = await soapService.getSubGroups2(subGroup.altgrpkod || subGroup.grpkod);
             for (const subGroup2 of subGroups2) {
@@ -185,22 +225,26 @@ async function syncCategories() {
 }
 
 async function fullSync() {
-  logger.info(`Starting FULL sync with account: ${SYNC_HESAP}`);
+  logger.info('Starting FULL sync');
   
-  // Ürün sync
   const all = await fetchAllErpProducts();
   const productResult = await upsertProducts(all);
   
-  // Kategori sync
-  const categoryResult = await syncCategories();
+  let categoryResult = { inserted: 0, updated: 0 };
+  try {
+    categoryResult = await syncCategories();
+  } catch (catError) {
+    logger.warn('Category sync failed, continuing without categories', {
+      error: catError.message
+    });
+  }
   
   await SyncCursor.updateOne(
     { key: 'products' },
     { 
       $set: { 
         lastSuccessfulSyncAt: new Date(),
-        lastSyncMode: 'full',
-        syncAccount: SYNC_HESAP
+        lastSyncMode: 'full'
       } 
     },
     { upsert: true }
@@ -214,22 +258,26 @@ async function fullSync() {
 }
 
 async function deltaSync() {
-  logger.info(`Starting DELTA sync with account: ${SYNC_HESAP}`);
+  logger.info('Starting DELTA sync');
   
-  // Ürün sync
   const all = await fetchAllErpProducts();
   const productResult = await upsertProducts(all);
   
-  // Kategori sync (delta'da da çalıştır)
-  const categoryResult = await syncCategories();
+  let categoryResult = { inserted: 0, updated: 0 };
+  try {
+    categoryResult = await syncCategories();
+  } catch (catError) {
+    logger.warn('Category sync failed, continuing without categories', {
+      error: catError.message
+    });
+  }
 
   await SyncCursor.updateOne(
     { key: 'products' },
     { 
       $set: { 
         lastSuccessfulSyncAt: new Date(),
-        lastSyncMode: 'delta',
-        syncAccount: SYNC_HESAP
+        lastSyncMode: 'delta'
       } 
     },
     { upsert: true }

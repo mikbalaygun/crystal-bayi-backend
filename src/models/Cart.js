@@ -1,7 +1,6 @@
 const mongoose = require('mongoose');
 
 const CartItemSchema = new mongoose.Schema({
-  // Ürün bilgileri - Product schema ile uyumlu
   stkno: {
     type: String,
     required: [true, 'Stock number is required'],
@@ -14,15 +13,17 @@ const CartItemSchema = new mongoose.Schema({
     trim: true
   },
   
+  // Frontend için TL fiyat
   fiyat: {
     type: Number,
     min: 0,
     required: [true, 'Price is required']
   },
   
+  // Frontend için para birimi (her zaman TRY)
   cinsi: {
     type: String,
-    default: 'TRY' // Para birimi
+    default: 'TRY'
   },
   
   birim: {
@@ -42,7 +43,6 @@ const CartItemSchema = new mongoose.Schema({
     default: 18
   },
   
-  // Cart specific fields
   adet: {
     type: Number,
     required: [true, 'Quantity is required'],
@@ -50,38 +50,45 @@ const CartItemSchema = new mongoose.Schema({
     default: 1
   },
   
-  // Sepete eklendiği anki fiyat (fiyat değişikliklerini takip için)
+  // Kullanıcının fiyat listesi
+  userPriceList: {
+    type: Number,
+    min: 1,
+    max: 15,
+    default: 1
+  },
+  
+  // Sepete eklendiğindeki TL fiyat (referans için)
   addedPrice: {
     type: Number,
     required: true
   },
   
-  // Sepete eklenme tarihi
   addedAt: {
     type: Date,
     default: Date.now
+  },
+  
+  imageUrl: {
+    type: String,
+    default: null
   }
-}, { _id: false }); // Sub-document olduğu için _id gereksiz
+}, { _id: false });
 
 const CartSchema = new mongoose.Schema({
-  // Kullanıcı bilgisi
   user: {
     type: String,
     required: [true, 'User is required'],
     trim: true
-    // unique: true ve index: true kaldırıldı
   },
   
-  // Sepet items
   items: [CartItemSchema],
   
-  // Son güncelleme
   lastSyncedAt: {
     type: Date,
     default: Date.now
   },
   
-  // Sepet durumu (aktif/pasif/sipariş verildi)
   status: {
     type: String,
     enum: ['active', 'ordered', 'abandoned'],
@@ -92,12 +99,15 @@ const CartSchema = new mongoose.Schema({
   collection: 'carts'
 });
 
-// Index'leri ayrı tanımla - duplicate index sorununu çözer
-CartSchema.index({ user: 1 }, { unique: true }); // Unique constraint burada
+CartSchema.index({ user: 1 }, { unique: true });
 CartSchema.index({ updatedAt: -1 });
 CartSchema.index({ 'items.stkno': 1 });
 
-// Static Methods
+// NOTLAR:
+// - Sepette sadece TL fiyatları saklanır (UI için)
+// - Sipariş esnasında MongoDB'den güncel orijinal fiyatlar çekilir
+// - Bu yaklaşım kur değişimlerinde otomatik güncelleme sağlar
+
 CartSchema.statics.getCartByUser = function(userId) {
   return this.findOne({ user: userId, status: 'active' }).lean();
 };
@@ -107,25 +117,23 @@ CartSchema.statics.addItemToCart = async function(userId, itemData) {
     let cart = await this.findOne({ user: userId, status: 'active' });
     
     if (!cart) {
-      // Yeni sepet oluştur
       cart = new this({
         user: userId,
         items: []
       });
     }
     
-    // Aynı ürün var mı kontrol et
     const existingItemIndex = cart.items.findIndex(item => item.stkno === itemData.stkno);
     
     if (existingItemIndex > -1) {
-      // Var olan ürünün miktarını artır
       cart.items[existingItemIndex].adet += itemData.adet || 1;
       cart.items[existingItemIndex].addedAt = new Date();
+      cart.items[existingItemIndex].fiyat = itemData.fiyat; // Güncel fiyatı güncelle
+      cart.items[existingItemIndex].addedPrice = itemData.fiyat;
     } else {
-      // Yeni ürün ekle
       cart.items.push({
         ...itemData,
-        addedPrice: itemData.fiyat, // Ekleme anındaki fiyatı sakla
+        addedPrice: itemData.fiyat,
         addedAt: new Date()
       });
     }
@@ -184,7 +192,6 @@ CartSchema.statics.syncCart = async function(userId, localItems) {
     let cart = await this.findOne({ user: userId, status: 'active' });
     
     if (!cart) {
-      // Yeni sepet oluştur
       cart = new this({
         user: userId,
         items: localItems.map(item => ({
@@ -194,7 +201,6 @@ CartSchema.statics.syncCart = async function(userId, localItems) {
         }))
       });
     } else {
-      // Mevcut sepet ile local sepeti merge et
       const mergedItems = this.mergeCartItems(cart.items, localItems);
       cart.items = mergedItems;
     }
@@ -206,7 +212,6 @@ CartSchema.statics.syncCart = async function(userId, localItems) {
   }
 };
 
-// Helper method for merging cart items
 CartSchema.statics.mergeCartItems = function(serverItems, localItems) {
   const merged = [...serverItems];
   
@@ -214,13 +219,13 @@ CartSchema.statics.mergeCartItems = function(serverItems, localItems) {
     const existingIndex = merged.findIndex(item => item.stkno === localItem.stkno);
     
     if (existingIndex > -1) {
-      // Hangi miktar daha büyükse onu al (kullanıcı dostu)
       if (localItem.adet > merged[existingIndex].adet) {
         merged[existingIndex].adet = localItem.adet;
         merged[existingIndex].addedAt = new Date();
+        merged[existingIndex].fiyat = localItem.fiyat; // Güncel fiyat
+        merged[existingIndex].addedPrice = localItem.fiyat;
       }
     } else {
-      // Yeni item ekle
       merged.push({
         ...localItem,
         addedPrice: localItem.fiyat,
@@ -232,7 +237,6 @@ CartSchema.statics.mergeCartItems = function(serverItems, localItems) {
   return merged;
 };
 
-// Sepeti sipariş durumuna çevir
 CartSchema.statics.markAsOrdered = function(userId) {
   return this.findOneAndUpdate(
     { user: userId, status: 'active' },

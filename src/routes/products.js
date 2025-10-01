@@ -9,6 +9,8 @@ const soapService = require('../services/soapService');
 const { AppError, catchAsync } = require('../middleware/errorHandler');
 const { authenticateToken } = require('../middleware/auth');
 const logger = require('../utils/logger');
+const { syncProductImages } = require('../services/imageSyncService');
+const currencyService = require('../services/currencyService');
 
 const validateProductFilters = [
   query('fgrp').optional().isString().trim(),
@@ -26,19 +28,18 @@ async function buildCategoryFilters({ fgrp, fagrp, fatgrp }) {
     const cat = await Category.findOne({ grpkod: fgrp }).lean();
     andFilters.push({
       $or: [
-        { fgrp },                                   // kod
-        ...(cat?.grpadi ? [{ grupadi: cat.grpadi }] : []) // ad
+        { fgrp },
+        ...(cat?.grpadi ? [{ grupadi: cat.grpadi }] : [])
       ]
     });
   }
 
   if (fagrp) {
     const cat = await Category.findOne({ grpkod: fagrp }).lean();
-    // Üründe alt grup adını hangi alan(lar)da saklıyorsan onları ekle
     andFilters.push({
       $or: [
-        { fagrp },                                                // kod
-        ...(cat?.grpadi ? [{ altgrupadi: cat.grpadi }, { grupadi2: cat.grpadi }] : []) // ad olası alanlar
+        { fagrp },
+        ...(cat?.grpadi ? [{ altgrupadi: cat.grpadi }, { grupadi2: cat.grpadi }] : [])
       ]
     });
   }
@@ -47,8 +48,8 @@ async function buildCategoryFilters({ fgrp, fagrp, fatgrp }) {
     const cat = await Category.findOne({ grpkod: fatgrp }).lean();
     andFilters.push({
       $or: [
-        { fatgrp },                                                 // kod
-        ...(cat?.grpadi ? [{ altgrupadi2: cat.grpadi }, { grupadi3: cat.grpadi }] : []) // ad olası alanlar
+        { fatgrp },
+        ...(cat?.grpadi ? [{ altgrupadi2: cat.grpadi }, { grupadi3: cat.grpadi }] : [])
       ]
     });
   }
@@ -71,17 +72,14 @@ router.get('/', authenticateToken, validateProductFilters, catchAsync(async (req
 
   const { fgrp, fagrp, fatgrp, search, page = 1, limit = 50 } = req.query;
   const userHesap = req.user.hesap;
+  const userPriceList = req.user.list || 1;
 
-  logger.request(req, `MongoDB products list for user: ${userHesap}`);
+  logger.request(req, `MongoDB products list for user: ${userHesap}, priceList: ${userPriceList}`);
 
-  // Temel query
   const query = { isActive: { $ne: false } };
-
-  // Kategori filtreleri (kod veya ada göre)
   const catFilter = await buildCategoryFilters({ fgrp, fagrp, fatgrp });
   Object.assign(query, catFilter);
 
-  // Arama filtresi
   if (search && search.length >= 2) {
     const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const regex = new RegExp(escaped, 'i');
@@ -97,17 +95,35 @@ router.get('/', authenticateToken, validateProductFilters, catchAsync(async (req
 
   const [products, totalCount] = await Promise.all([
     Product.find(query)
-      .select('stkno stokadi grupadi fiyat cinsi bakiye birim kdv uruntipi fgrp fagrp fatgrp') // ← cinsi eklendi
+      .select('stkno stokadi grupadi priceList cinsi bakiye birim kdv uruntipi fgrp fagrp fatgrp imageUrl')
       .skip(skip)
       .limit(limit)
       .lean(),
     Product.countDocuments(query)
   ]);
 
+  // Kullanıcının fiyat listesine göre fiyatı ekle
+  const productsWithPrice = products.map(p => ({
+    stkno: p.stkno,
+    stokadi: p.stokadi,
+    grupadi: p.grupadi,
+    fiyat: p.priceList?.[`fiyat${userPriceList}`] || 0,
+    cinsi: 'TRY',
+    bakiye: p.bakiye,
+    birim: p.birim,
+    kdv: p.kdv,
+    uruntipi: p.uruntipi,
+    fgrp: p.fgrp,
+    fagrp: p.fagrp,
+    fatgrp: p.fatgrp,
+    imageUrl: p.imageUrl
+  }));
+
   logger.info('MongoDB products fetched', {
     userHesap,
+    userPriceList,
     totalProducts: totalCount,
-    returnedProducts: products.length,
+    returnedProducts: productsWithPrice.length,
     page,
     limit,
     requestId: req.id
@@ -116,7 +132,7 @@ router.get('/', authenticateToken, validateProductFilters, catchAsync(async (req
   return res.json({
     success: true,
     data: {
-      products,
+      products: productsWithPrice,
       pagination: {
         currentPage: Number(page),
         totalPages: Math.ceil(totalCount / limit),
@@ -216,6 +232,7 @@ router.get('/search', authenticateToken, catchAsync(async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 50, 100);
   const page = Math.max(parseInt(req.query.page) || 1, 1);
   const skip = (page - 1) * limit;
+  const userPriceList = req.user.list || 1;
 
   if (q.length < 2) {
     throw new AppError('Search term must be at least 2 characters', 400);
@@ -240,7 +257,7 @@ router.get('/search', authenticateToken, catchAsync(async (req, res) => {
 
   const projection = {
     score: { $meta: 'textScore' },
-    stkno: 1, stokadi: 1, grupadi: 1, fiyat: 1, cinsi: 1, bakiye: 1, birim: 1, kdv: 1, uruntipi: 1 // ← cinsi eklendi
+    stkno: 1, stokadi: 1, grupadi: 1, priceList: 1, cinsi: 1, bakiye: 1, birim: 1, kdv: 1, uruntipi: 1, imageUrl: 1
   };
 
   const [items, total] = await Promise.all([
@@ -248,14 +265,28 @@ router.get('/search', authenticateToken, catchAsync(async (req, res) => {
     Product.countDocuments(query)
   ]);
 
+  // Kullanıcının fiyat listesine göre fiyatı ekle
+  const productsWithPrice = items.map(p => ({
+    stkno: p.stkno,
+    stokadi: p.stokadi,
+    grupadi: p.grupadi,
+    fiyat: p.priceList?.[`fiyat${userPriceList}`] || 0,
+    cinsi: 'TRY',
+    bakiye: p.bakiye,
+    birim: p.birim,
+    kdv: p.kdv,
+    uruntipi: p.uruntipi,
+    imageUrl: p.imageUrl
+  }));
+
   logger.info('Mongo search completed', {
-    q, totalMatched: total, returned: items.length, page, limit, requestId: req.id
+    q, userPriceList, totalMatched: total, returned: productsWithPrice.length, page, limit, requestId: req.id
   });
 
   return res.json({
     success: true,
     data: {
-      products: items,
+      products: productsWithPrice,
       totalMatched: total,
       pagination: {
         currentPage: page,
@@ -268,30 +299,39 @@ router.get('/search', authenticateToken, catchAsync(async (req, res) => {
 }));
 
 // ===============================
-// GET /api/products/:stockNo (MONGO + ERP FALLBACK)
+// GET /api/products/:stockNo (MONGO)
 // ===============================
 router.get('/:stockNo', authenticateToken, catchAsync(async (req, res) => {
   const { stockNo } = req.params;
   const userHesap = req.user.hesap;
+  const userPriceList = req.user.list || 1;
+  
   if (!stockNo) throw new AppError('Stock number is required', 400);
 
-  logger.request(req, `Fetching single product: ${stockNo}, user: ${userHesap}`);
+  logger.request(req, `Fetching single product: ${stockNo}, user: ${userHesap}, priceList: ${userPriceList}`);
 
-  // 1) MongoDB
   const fromDb = await Product.findOne({ stkno: stockNo, isActive: { $ne: false } })
-    .select({ stkno: 1, stokadi: 1, grupadi: 1, fiyat: 1, cinsi: 1, bakiye: 1, birim: 1, kdv: 1, uruntipi: 1, _id: 0 }) // ← cinsi eklendi
+    .select('stkno stokadi grupadi priceList cinsi bakiye birim kdv uruntipi imageUrl')
     .lean();
 
-  if (fromDb) {
-    return res.json({ success: true, data: fromDb, source: 'mongo' });
+  if (!fromDb) {
+    throw new AppError('Product not found', 404);
   }
 
-  // 2) ERP fallback
-  const all = await soapService.getProducts(userHesap, {}) || [];
-  const found = all.find(p => p.stkno === stockNo);
-  if (!found) throw new AppError('Product not found', 404);
-
-  return res.json({ success: true, data: found, source: 'erp' });
+  const productWithPrice = {
+    stkno: fromDb.stkno,
+    stokadi: fromDb.stokadi,
+    grupadi: fromDb.grupadi,
+    fiyat: fromDb.priceList?.[`fiyat${userPriceList}`] || 0,
+    cinsi: 'TRY',
+    bakiye: fromDb.bakiye,
+    birim: fromDb.birim,
+    kdv: fromDb.kdv,
+    uruntipi: fromDb.uruntipi,
+    imageUrl: fromDb.imageUrl
+  };
+  
+  return res.json({ success: true, data: productWithPrice, source: 'mongo' });
 }));
 
 // ===============================
@@ -324,93 +364,56 @@ router.post('/sync-categories', authenticateToken, catchAsync(async (req, res) =
 }));
 
 // ===============================
-// GET /api/products/debug/currency-values (CİNSİ FIELD'INDAKI DEĞERLER)
+// POST /api/products/sync-images
 // ===============================
-router.get('/debug/currency-values', authenticateToken, catchAsync(async (req, res) => {
+router.post('/sync-images', authenticateToken, catchAsync(async (req, res) => {
+  if (process.env.ALLOW_PRODUCT_SYNC !== 'true') {
+    throw new AppError('Image sync is disabled', 403);
+  }
+
+  logger.request(req, `Manual image sync triggered by: ${req.user.hesap}`);
+
+  const result = await syncProductImages();
+  return res.json({ success: true, ...result });
+}));
+
+// ===============================
+// GET /api/products/debug/price-lists
+// ===============================
+router.get('/debug/price-lists', authenticateToken, catchAsync(async (req, res) => {
   const userHesap = req.user.hesap;
+  const userPriceList = req.user.list || 1;
   
-  logger.request(req, `Debug: Analyzing currency values for user: ${userHesap}`);
+  logger.request(req, `Debug: Analyzing price lists for user: ${userHesap}, list: ${userPriceList}`);
 
   try {
-    // MongoDB'den cinsi değerlerini analiz et
-    const currencyAnalysis = await Product.aggregate([
-      { $match: { isActive: { $ne: false } } },
-      { 
-        $group: { 
-          _id: "$cinsi", 
-          count: { $sum: 1 },
-          sampleProducts: { $push: { stkno: "$stkno", stokadi: "$stokadi", grupadi: "$grupadi", fiyat: "$fiyat" } }
-        } 
-      },
-      { $sort: { count: -1 } },
-      {
-        $project: {
-          cinsi: "$_id",
-          count: 1,
-          sampleProducts: { $slice: ["$sampleProducts", 5] }, // Her gruptan 5 örnek
-          _id: 0
-        }
-      }
-    ]);
+    // MongoDB'den örnek ürünler
+    const sampleProducts = await Product.find({ isActive: { $ne: false } })
+      .select('stkno stokadi grupadi priceList cinsi')
+      .limit(10)
+      .lean();
 
-    // SOAP'tan da cinsi değerlerini kontrol et
-    const soapProducts = await soapService.getProducts(userHesap, {});
-    const soapCurrencyValues = {};
-    
-    soapProducts.forEach(product => {
-      const cinsi = product.cinsi || 'empty';
-      if (!soapCurrencyValues[cinsi]) {
-        soapCurrencyValues[cinsi] = {
-          count: 0,
-          samples: []
-        };
-      }
-      soapCurrencyValues[cinsi].count++;
-      if (soapCurrencyValues[cinsi].samples.length < 5) {
-        soapCurrencyValues[cinsi].samples.push({
-          stkno: product.stkno,
-          stokadi: product.stokadi,
-          grupadi: product.grupadi,
-          fiyat: product.fiyat
-        });
-      }
-    });
-
-    // Profil grubundaki ürünleri özel analiz
-    const profilProducts = await Product.find({ 
-      grupadi: /PROFIL/i,
-      isActive: { $ne: false }
-    })
-    .select('stkno stokadi grupadi fiyat cinsi')
-    .limit(10)
-    .lean();
-
-    const profilSoapProducts = soapProducts.filter(p => 
-      p.grupadi && p.grupadi.toUpperCase().includes('PROFIL')
-    ).slice(0, 10);
+    // Kullanıcının fiyat listesine göre dönüştür
+    const productsWithUserPrice = sampleProducts.map(p => ({
+      stkno: p.stkno,
+      stokadi: p.stokadi,
+      grupadi: p.grupadi,
+      userPrice: p.priceList?.[`fiyat${userPriceList}`] || 0,
+      allPrices: p.priceList,
+      cinsi: p.cinsi
+    }));
 
     return res.json({
       success: true,
       data: {
-        mongoDbCurrencyAnalysis: currencyAnalysis,
-        soapCurrencyAnalysis: Object.entries(soapCurrencyValues).map(([cinsi, data]) => ({
-          cinsi: cinsi === 'empty' ? '(empty)' : cinsi,
-          count: data.count,
-          samples: data.samples
-        })),
-        profilProductsInMongoDB: profilProducts,
-        profilProductsInSOAP: profilSoapProducts,
-        summary: {
-          totalMongoProducts: await Product.countDocuments({ isActive: { $ne: false } }),
-          totalSoapProducts: soapProducts.length,
-          profilCountMongo: profilProducts.length,
-          profilCountSoap: profilSoapProducts.length
-        }
+        userPriceList,
+        sampleProducts: productsWithUserPrice,
+        totalProducts: await Product.countDocuments({ isActive: { $ne: false } })
       }
     });
 
   } catch (error) {
-    logger.error('Currency values debug error', {
+    logger.error('Price lists debug error', {
       userHesap,
       error: error.message,
       requestId: req.id
@@ -418,10 +421,93 @@ router.get('/debug/currency-values', authenticateToken, catchAsync(async (req, r
 
     return res.status(500).json({
       success: false,
-      message: 'Failed to analyze currency values',
+      message: 'Failed to analyze price lists',
       error: error.message
     });
   }
+}));
+
+// TEST: priceList kontrolü
+router.get('/test-pricelist/:stkno', authenticateToken, catchAsync(async (req, res) => {
+  const { stkno } = req.params;
+  
+  const product = await Product.findOne({ stkno }).lean();
+  
+  if (!product) {
+    return res.json({ success: false, message: 'Product not found' });
+  }
+  
+  return res.json({
+    success: true,
+    data: {
+      stkno: product.stkno,
+      stokadi: product.stokadi,
+      priceList: product.priceList,
+      rawData: product._raw
+    }
+  });
+}));
+
+// Kur bilgilerini göster
+router.get('/currency-rates', authenticateToken, catchAsync(async (req, res) => {
+  const rates = await currencyService.getAllRates();
+  
+  res.json({
+    success: true,
+    rates
+  });
+}));
+
+// GEÇICI: MongoDB temizleme endpoint'i (sadece test için)
+router.delete('/cleanup-all', authenticateToken, catchAsync(async (req, res) => {
+  // Sadece admin kullanıcılar çalıştırabilir
+  if (req.user.type !== 'admin') {
+    throw new AppError('Admin access required', 403);
+  }
+
+  logger.warn('Cleaning up all products from database', {
+    user: req.user.hesap,
+    requestId: req.id
+  });
+
+  const result = await Product.deleteMany({});
+
+  logger.info('Products cleaned up', {
+    deletedCount: result.deletedCount,
+    user: req.user.hesap,
+    requestId: req.id
+  });
+
+  res.json({
+    success: true,
+    message: 'All products deleted',
+    deletedCount: result.deletedCount
+  });
+}));
+
+// products.js route'una ekleyin
+router.delete('/cleanup-cart-favorites', authenticateToken, catchAsync(async (req, res) => {
+  if (req.user.type !== 'admin') {
+    throw new AppError('Admin access required', 403);
+  }
+
+  const Cart = require('../models/Cart');
+  const FavoriteProduct = require('../models/FavoriteProduct');
+
+  const cartResult = await Cart.deleteMany({});
+  const favResult = await FavoriteProduct.deleteMany({});
+
+  logger.warn('Cart and favorites cleaned up', {
+    cartsDeleted: cartResult.deletedCount,
+    favoritesDeleted: favResult.deletedCount,
+    user: req.user.hesap
+  });
+
+  res.json({
+    success: true,
+    cartsDeleted: cartResult.deletedCount,
+    favoritesDeleted: favResult.deletedCount
+  });
 }));
 
 module.exports = router;

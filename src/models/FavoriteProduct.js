@@ -1,15 +1,12 @@
 const mongoose = require('mongoose');
 
 const FavoriteProductSchema = new mongoose.Schema({
-  // Kullanıcı bilgisi - eski schema ile uyumlu
   user: {
     type: String,
     required: [true, 'User is required'],
     trim: true
-    // index: true kaldırıldı
   },
   
-  // Ürün bilgileri - SOAP'tan gelen
   stkno: {
     type: String,
     required: [true, 'Stock number is required'],
@@ -22,12 +19,22 @@ const FavoriteProductSchema = new mongoose.Schema({
     trim: true
   },
   
+  // Favoriye eklendiğindeki TL fiyat (referans için)
   fiyat: {
     type: Number,
     min: 0,
     default: 0
   },
   
+  // Kullanıcının hangi fiyat listesini kullandığı
+  userPriceList: {
+    type: Number,
+    min: 1,
+    max: 15,
+    default: 1
+  },
+  
+  // Frontend için para birimi (her zaman TRY)
   cinsi: {
     type: String,
     default: 'TRY'
@@ -73,17 +80,25 @@ const FavoriteProductSchema = new mongoose.Schema({
   fatgrp: {
     type: String,
     default: ''
+  },
+  
+  imageUrl: {
+    type: String,
+    default: null
   }
 }, {
   timestamps: true,
   collection: 'favoriteProducts'
 });
 
-// Index'leri ayrı olarak tanımla
-FavoriteProductSchema.index({ user: 1, stkno: 1 }, { unique: true, name: 'user_stkno_unique' });
-FavoriteProductSchema.index({ user: 1, createdAt: -1 }, { name: 'user_created_desc' });
+FavoriteProductSchema.index({ user: 1, stkno: 1 }, { unique: true });
+FavoriteProductSchema.index({ user: 1, createdAt: -1 });
 
-// Static metodlar - user field'ını kullan
+// NOTLAR:
+// - Favorilerde sadece TL fiyatları saklanır (referans için)
+// - Sepete eklenirken veya sipariş verilirken MongoDB'den güncel fiyatlar çekilir
+// - Bu yaklaşım kur değişimlerinde otomatik güncelleme sağlar
+
 FavoriteProductSchema.statics.getFavoritesByUser = function(userId) {
   return this.find({ user: userId })
     .sort({ createdAt: -1 })

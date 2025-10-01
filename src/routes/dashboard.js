@@ -7,110 +7,79 @@ const { AppError, catchAsync } = require('../middleware/errorHandler');
 const { authenticateToken } = require('../middleware/auth');
 const logger = require('../utils/logger');
 
-// ===============================
 // GET /api/dashboard/stats
-// Get dashboard statistics
-// ===============================
 router.get('/stats', authenticateToken, catchAsync(async (req, res) => {
   const userHesap = req.user.hesap;
 
   logger.request(req, `Fetching dashboard stats for user: ${userHesap}`);
 
+  let stats = {
+    waitingOrders: 0,
+    waitingOrdersPrice: 0,
+    totalFavorites: 0,
+    recentOrdersCount: 0,
+    accountBalance: parseFloat(req.user.bakiye) || 0
+  };
+
+  // Get waiting orders from SOAP
   try {
-    // Initialize default stats
-    let stats = {
-      waitingOrders: 0,
-      waitingOrdersPrice: 0,
-      totalFavorites: 0,
-      recentOrdersCount: 0,
-      accountBalance: parseFloat(req.user.bakiye) || 0
-    };
-
-    // Get waiting orders from SOAP
-    try {
-      const orders = await soapService.getOrders(userHesap);
+    const orders = await soapService.getOrders(userHesap);
+    
+    if (orders && orders.length > 0) {
+      stats.waitingOrders = orders.length;
+      stats.waitingOrdersPrice = orders.reduce((total, order) => {
+        return total + (parseFloat(order.siptut) || 0);
+      }, 0);
       
-      if (orders && orders.length > 0) {
-        stats.waitingOrders = orders.length;
-        stats.waitingOrdersPrice = orders.reduce((total, order) => {
-          return total + (parseFloat(order.siptut) || 0);
-        }, 0);
-        
-        // Count recent orders (last 7 days)
-        const sevenDaysAgo = new Date();
-        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-        
-        stats.recentOrdersCount = orders.filter(order => {
-          if (order.tarih) {
-            try {
-              // Assuming date format is DD-MM-YYYY or similar
-              const orderDate = new Date(order.tarih);
-              return orderDate >= sevenDaysAgo;
-            } catch (dateError) {
-              return false;
-            }
+      const sevenDaysAgo = new Date();
+      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+      
+      stats.recentOrdersCount = orders.filter(order => {
+        if (order.tarih) {
+          try {
+            const orderDate = new Date(order.tarih);
+            return orderDate >= sevenDaysAgo;
+          } catch (dateError) {
+            return false;
           }
-          return false;
-        }).length;
-      }
-    } catch (soapError) {
-      logger.warn('SOAP service error for orders - using default values', {
-        userHesap,
-        error: soapError.message,
-        requestId: req.id
-      });
+        }
+        return false;
+      }).length;
     }
-
-    // Get favorites count from MongoDB
-    try {
-      stats.totalFavorites = await FavoriteProduct.countDocuments({
-        userHesap,
-        isActive: true
-      });
-    } catch (dbError) {
-      logger.warn('Database error for favorites - using default value', {
-        userHesap,
-        error: dbError.message,
-        requestId: req.id
-      });
-    }
-
-    logger.info('Dashboard stats fetched successfully', {
+  } catch (soapError) {
+    logger.warn('SOAP service error for orders - using default values', {
       userHesap,
-      stats,
+      error: soapError.message,
       requestId: req.id
-    });
-
-    res.json({
-      success: true,
-      data: stats
-    });
-
-  } catch (error) {
-    logger.error('Failed to fetch dashboard stats:', {
-      userHesap,
-      error: error.message,
-      requestId: req.id
-    });
-
-    // Return default stats on error to keep dashboard functional
-    res.json({
-      success: true,
-      data: {
-        waitingOrders: 0,
-        waitingOrdersPrice: 0,
-        totalFavorites: 0,
-        recentOrdersCount: 0,
-        accountBalance: parseFloat(req.user.bakiye) || 0
-      }
     });
   }
+
+  // Get favorites count - user field kullan, isActive yok
+  try {
+    stats.totalFavorites = await FavoriteProduct.countDocuments({
+      user: userHesap
+    });
+  } catch (dbError) {
+    logger.warn('Database error for favorites - using default value', {
+      userHesap,
+      error: dbError.message,
+      requestId: req.id
+    });
+  }
+
+  logger.info('Dashboard stats fetched successfully', {
+    userHesap,
+    stats,
+    requestId: req.id
+  });
+
+  res.json({
+    success: true,
+    data: stats
+  });
 }));
 
-// ===============================
 // GET /api/dashboard/recent-orders
-// Get recent orders for dashboard
-// ===============================
 router.get('/recent-orders', authenticateToken, catchAsync(async (req, res) => {
   const userHesap = req.user.hesap;
   const limit = parseInt(req.query.limit) || 5;
@@ -120,7 +89,6 @@ router.get('/recent-orders', authenticateToken, catchAsync(async (req, res) => {
   try {
     const allOrders = await soapService.getOrders(userHesap);
     
-    // Sort by date (most recent first) and limit
     const recentOrders = allOrders
       .sort((a, b) => {
         try {
@@ -158,7 +126,6 @@ router.get('/recent-orders', authenticateToken, catchAsync(async (req, res) => {
       requestId: req.id
     });
 
-    // Return empty array on error
     res.json({
       success: true,
       data: []
@@ -166,10 +133,7 @@ router.get('/recent-orders', authenticateToken, catchAsync(async (req, res) => {
   }
 }));
 
-// ===============================
 // GET /api/dashboard/recent-favorites
-// Get recently added favorite products
-// ===============================
 router.get('/recent-favorites', authenticateToken, catchAsync(async (req, res) => {
   const userHesap = req.user.hesap;
   const limit = parseInt(req.query.limit) || 5;
@@ -177,13 +141,13 @@ router.get('/recent-favorites', authenticateToken, catchAsync(async (req, res) =
   logger.request(req, `Fetching recent favorites for dashboard: ${userHesap}`);
 
   try {
+    // user field kullan, isActive ve addedAt yok, createdAt kullan
     const recentFavorites = await FavoriteProduct.find({
-      userHesap,
-      isActive: true
+      user: userHesap
     })
-    .sort({ addedAt: -1 })
+    .sort({ createdAt: -1 })
     .limit(limit)
-    .select('stkno stokadi fiyat addedAt')
+    .select('stkno stokadi fiyat createdAt')
     .lean();
 
     logger.info('Recent favorites fetched successfully', {
@@ -211,60 +175,42 @@ router.get('/recent-favorites', authenticateToken, catchAsync(async (req, res) =
   }
 }));
 
-// ===============================
 // GET /api/dashboard/account-info
-// Get account information summary
-// ===============================
 router.get('/account-info', authenticateToken, catchAsync(async (req, res) => {
   const user = req.user;
 
   logger.request(req, `Fetching account info for user: ${user.hesap}`);
 
-  try {
-    const accountInfo = {
-      company: user.company || '',
-      username: user.username || '',
-      email: user.email || '',
-      phone: user.phone || '',
-      bakiye: parseFloat(user.bakiye) || 0,
-      adres: user.adres || '',
-      sehir: user.sehir || '',
-      ulke: user.ulke || '',
-      type: user.type || 'customer'
-    };
+  const accountInfo = {
+    company: user.company || '',
+    username: user.username || '',
+    email: user.email || '',
+    phone: user.phone || '',
+    bakiye: parseFloat(user.bakiye) || 0,
+    adres: user.adres || '',
+    sehir: user.sehir || '',
+    ulke: user.ulke || '',
+    type: user.type || 'customer',
+    priceList: user.list || 1 // Fiyat listesi bilgisi
+  };
 
-    logger.info('Account info fetched successfully', {
-      userHesap: user.hesap,
-      requestId: req.id
-    });
+  logger.info('Account info fetched successfully', {
+    userHesap: user.hesap,
+    priceList: user.list,
+    requestId: req.id
+  });
 
-    res.json({
-      success: true,
-      data: accountInfo
-    });
-
-  } catch (error) {
-    logger.error('Failed to fetch account info:', {
-      userHesap: user.hesap,
-      error: error.message,
-      requestId: req.id
-    });
-
-    throw new AppError('Failed to fetch account information', 500);
-  }
+  res.json({
+    success: true,
+    data: accountInfo
+  });
 }));
 
-// ===============================
 // GET /api/dashboard/health
-// Dashboard health check
-// ===============================
 router.get('/health', catchAsync(async (req, res) => {
   try {
-    // Check SOAP service health
     const soapHealth = await soapService.healthCheck();
     
-    // Check MongoDB health
-    const FavoriteProduct = require('../models/FavoriteProduct');
     const dbHealth = { status: 'OK' };
     
     try {

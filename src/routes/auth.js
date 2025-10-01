@@ -116,6 +116,7 @@ router.post('/login', authLimiter, validateLogin, catchAsync(async (req, res) =>
         type: userPayload.type,
         company: userPayload.company,
         email: userPayload.email,
+        list: userPayload.list,
         phone: userPayload.phone,
         bakiye: userPayload.bakiye
       }

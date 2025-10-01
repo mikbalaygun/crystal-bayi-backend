@@ -88,7 +88,7 @@ const connectDB = async () => {
   try {
     const conn = await mongoose.connect(process.env.MONGODB_URI, {
       maxPoolSize: 10,
-      serverSelectionTimeoutMS: 5000,
+      serverSelectionTimeoutMS: 30000,  // 5000'den 30000'e değişti
       socketTimeoutMS: 45000,
     });
     logger.info(`✅ MongoDB connected: ${conn.connection.host}`);
@@ -178,9 +178,10 @@ const startServer = async () => {
       logger.info(`🔗 Frontend URL(s): ${allowedOrigins.join(', ')}`);
     });
 
-    // >>> Cron'u burada başlat <<<
-    const { scheduleProductSync } = require('./cron');
+    // >>> Cron'ları burada başlat <
+    const { scheduleProductSync, scheduleImageSync } = require('./cron');
     scheduleProductSync(); // ENABLE_PRODUCT_CRON=true ise aktif
+    scheduleImageSync(); // ENABLE_IMAGE_CRON=true ise aktif
 
     server.on('error', (error) => {
       if (error.code === 'EADDRINUSE') logger.error(`❌ Port ${PORT} is already in use`);
