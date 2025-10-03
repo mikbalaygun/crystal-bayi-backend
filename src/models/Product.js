@@ -23,6 +23,23 @@ const ProductSchema = new mongoose.Schema({
     fiyat14: { type: Number, default: 0 },
     fiyat15: { type: Number, default: 0 }
   },
+  originalPriceList: {
+    fiyat1: { type: Number, default: 0 },
+    fiyat2: { type: Number, default: 0 },
+    fiyat3: { type: Number, default: 0 },
+    fiyat4: { type: Number, default: 0 },
+    fiyat5: { type: Number, default: 0 },
+    fiyat6: { type: Number, default: 0 },
+    fiyat7: { type: Number, default: 0 },
+    fiyat8: { type: Number, default: 0 },
+    fiyat9: { type: Number, default: 0 },
+    fiyat10: { type: Number, default: 0 },
+    fiyat11: { type: Number, default: 0 },
+    fiyat12: { type: Number, default: 0 },
+    fiyat13: { type: Number, default: 0 },
+    fiyat14: { type: Number, default: 0 },
+    fiyat15: { type: Number, default: 0 }
+  },
   
   cinsi: { type: String, default: 'TRY' },
   bakiye: { type: Number, default: 0 },

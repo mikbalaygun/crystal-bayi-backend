@@ -1,3 +1,4 @@
+// src/services/soapService.js
 const soap = require('soap');
 const logger = require('../utils/logger');
 const { AppError } = require('../middleware/errorHandler');
@@ -7,6 +8,21 @@ class SoapService {
     this.client = null;
     this.wsdl = process.env.SOAP_KRISTAL_WSDL;
     this.endpoint = process.env.SOAP_KRISTAL_ENDPOINT;
+  }
+
+  // --- helpers ---
+  toNumber(n, def = 0) {
+    const v = Number(n);
+    return Number.isFinite(v) ? v : def;
+  }
+
+  normalizeCurrency(code) {
+    const c = String(code || 'TRY').toUpperCase().trim();
+    // ERP'ye TL göndereceğiz; burada sadece sınıflandırma için kullanıyoruz
+    if (c === 'TL') return 'TL';
+    if (c === 'TRY') return 'TRY';
+    if (['USD', 'EUR', 'GBP'].includes(c)) return c;
+    return c; // diğerleri
   }
 
   async createClient() {
@@ -114,7 +130,7 @@ class SoapService {
   }
 
   // PRODUCTS - slStoklist metodunu kaldırdık (artık kullanılmayacak)
-  
+
   async getProductsWithAllPrices() {
     try {
       logger.info('Calling ikoStoklist (multi-price list)');
@@ -126,7 +142,7 @@ class SoapService {
         throw new AppError('ikoStoklist returned empty result', 500);
       }
 
-      // TTStoklar içinde TTStoklarRow var (dikkat: "lar" ile bitiyor)
+      // TTStoklar içinde TTStoklarRow var
       const products = result[0]?.TTStoklar?.TTStoklarRow || [];
       const count = Array.isArray(products) ? products.length : (products ? 1 : 0);
 
@@ -210,22 +226,45 @@ class SoapService {
     }
   }
 
+  /**
+   * İSTENEN DAVRANIŞ:
+   * - TL gelen ürünlerde: wsipfyt = product.fiyat (TL), wcinsi = 'TL'
+   * - USD/EUR (ve diğer yabancı) gelen ürünlerde: wsipfyt = product.fiyatTL (TL'ye çevrilmiş),
+   *   wcinsi = 'TL'
+   * Not: fiyatTL yoksa güvenli fallback olarak product.fiyat kullanıyoruz.
+   * (İsterseniz bu fallback'i kaldırıp 400 hata döndürtebiliriz.)
+   */
   async createOrder(userHesap, products) {
     try {
       const moment = require('moment');
-      const orderProducts = products.map(product => ({
-        wcinsi: product.cinsi || 'TRY',  // ✅ TL yerine TRY
-        wstkno: product.stkno,
-        wsipmik: product.adet,
-        wsipfyt: product.fiyat,  // Orijinal fiyat (orders.js'den geliyor)
-        wtermin: moment().format('DD-MM-YYYY'),
-        wsiptut: product.fiyat * product.adet,
-        wacik: 'WEB',
-        wsipisktut: 0,
-        wsipisk1: 0,
-        wsipisk2: 0,
-        wsipisk3: 0
-      }));
+
+      const orderProducts = products.map((product) => {
+        const adet = this.toNumber(product.adet, 0);
+        const cinsi = this.normalizeCurrency(product.cinsi);
+        const isFx = !['TL', 'TRY'].includes(cinsi); // TL/TRY dışı (USD/EUR/GBP vs.)
+
+        // TL ürünlerde orijinal TL fiyatı; yabancı para ürünlerde TL karşılığı (fiyatTL)
+        const unitTL = isFx
+          ? (this.toNumber(product.fiyatTL, NaN)) // fiyatTL bekleniyor
+          : this.toNumber(product.fiyat, 0);      // native TL
+
+        // fiyatTL yoksa güvenli fallback
+        const safeUnitTL = Number.isFinite(unitTL) ? unitTL : this.toNumber(product.fiyat, 0);
+
+        return {
+          wcinsi: 'TL',                                      // ERP 'TL' istiyor
+          wstkno: product.stkno,
+          wsipmik: adet,
+          wsipfyt: Number(safeUnitTL.toFixed(4)),            // TL birim fiyat
+          wtermin: moment().format('DD-MM-YYYY'),
+          wsiptut: Number((safeUnitTL * adet).toFixed(4)),   // TL toplam
+          wacik: isFx ? 'WEB (TL via fiyatTL)' : 'WEB',
+          wsipisktut: 0,
+          wsipisk1: 0,
+          wsipisk2: 0,
+          wsipisk3: 0
+        };
+      });
 
       const params = {
         vhesap: userHesap,
@@ -235,7 +274,9 @@ class SoapService {
       const result = await this.callSoapMethod('sipcrea', params);
       logger.info(`✅ Order created successfully for user ${userHesap}`, {
         productCount: products.length,
-        currencies: [...new Set(products.map(p => p.cinsi))],
+        currenciesBefore: [...new Set(products.map(p => (p.cinsi || '').toString().toUpperCase()))],
+        currencySent: 'TL',
+        usedTLSource: [...new Set(orderProducts.map(p => p.wacik.includes('(TL via fiyatTL)') ? 'fiyatTL' : 'nativeTL'))],
         result
       });
 
