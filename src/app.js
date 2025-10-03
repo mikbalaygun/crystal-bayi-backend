@@ -56,6 +56,7 @@ const limiter = rateLimit({
   legacyHeaders: false
 });
 app.use('/api/', limiter);
+app.set('trust proxy', process.env.TRUST_PROXY === 'true');
 
 // Body parsing
 app.use(express.json({
