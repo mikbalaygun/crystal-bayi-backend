@@ -7,7 +7,7 @@ const currencyService = require('./currencyService');
 const logger = require('../utils/logger');
 
 function checksumOf(p) {
-  const prices = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
+  const prices = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     .map(i => p[`fiyat${i}`] || 0)
     .join('|');
   const base = `${p.stkno}|${p.stokadi}|${prices}|${p.bakiye ?? ''}|${p.grupadi ?? ''}|${p.cinsi ?? ''}`;
@@ -16,24 +16,24 @@ function checksumOf(p) {
 
 async function fetchAllErpProducts() {
   logger.info('Attempting to fetch products with ikoStoklist');
-  
+
   const ikoProducts = await soapService.getProductsWithAllPrices();
-  
+
   if (ikoProducts && ikoProducts.length > 0) {
     logger.info(`Using ikoStoklist - got ${ikoProducts.length} products`);
     return ikoProducts;
   }
-  
+
   logger.warn('ikoStoklist returned 0 products, falling back to slStoklist');
   const list = await soapService.getProducts('07748', {});
-  
+
   if (list.length > 0) {
     logger.info('Sample product fields from slStoklist:', {
       allFields: Object.keys(list[0]),
       sampleProduct: list[0]
     });
   }
-  
+
   return Array.isArray(list) ? list : (list ? [list] : []);
 }
 
@@ -43,7 +43,7 @@ async function upsertProducts(products = []) {
   logger.info('Getting currency rates for conversion...');
   const usdRate = await currencyService.getRate('USD');
   const eurRate = await currencyService.getRate('EUR');
-  
+
   logger.info(`Using rates: USD=${usdRate}, EUR=${eurRate}`);
 
   const BATCH_SIZE = 500;
@@ -53,22 +53,22 @@ async function upsertProducts(products = []) {
 
   for (let i = 0; i < products.length; i += BATCH_SIZE) {
     const batch = products.slice(i, i + BATCH_SIZE);
-    
+
     const ops = batch.map(p => {
       const bakiye = Number(p.bakiye ?? p.bky ?? p.stok ?? 0);
       const currency = (p.cinsi?.trim().toUpperCase() || 'TRY');
-      
+
       // İstatistik
       currencyStats[currency] = (currencyStats[currency] || 0) + 1;
-      
+
       // Orijinal fiyatları sakla
       const originalPriceList = {};
       const priceList = {};
-      
+
       for (let j = 1; j <= 15; j++) {
         const originalPrice = Number(p[`fiyat${j}`] ?? 0);
         originalPriceList[`fiyat${j}`] = originalPrice;
-        
+
         // TL'ye çevir
         let convertedPrice = originalPrice;
         if (currency === 'USD') {
@@ -76,10 +76,10 @@ async function upsertProducts(products = []) {
         } else if (currency === 'EUR') {
           convertedPrice = originalPrice * eurRate;
         }
-        
+
         priceList[`fiyat${j}`] = Math.round(convertedPrice * 100) / 100; // 2 ondalık
       }
-      
+
       const doc = {
         stkno: p.stkno,
         stokadi: p.stokadi,
@@ -99,11 +99,11 @@ async function upsertProducts(products = []) {
         syncedAt: new Date(),
         _raw: p
       };
-      
+
       return {
         updateOne: {
           filter: { stkno: p.stkno },
-          update: { 
+          update: {
             $set: doc,
             // Image alanlarını sadece insert'te ekle, update'te dokunma
             $setOnInsert: {
@@ -121,10 +121,10 @@ async function upsertProducts(products = []) {
       const res = await Product.bulkWrite(ops, { ordered: false });
       totalInserted += res.upsertedCount || 0;
       totalUpdated += res.modifiedCount || 0;
-      
-      logger.info(`Batch ${Math.floor(i/BATCH_SIZE) + 1} completed: ${batch.length} products processed`);
+
+      logger.info(`Batch ${Math.floor(i / BATCH_SIZE) + 1} completed: ${batch.length} products processed`);
     } catch (error) {
-      logger.error(`Batch ${Math.floor(i/BATCH_SIZE) + 1} failed:`, error.message);
+      logger.error(`Batch ${Math.floor(i / BATCH_SIZE) + 1} failed:`, error.message);
       throw error;
     }
   }
@@ -135,11 +135,11 @@ async function upsertProducts(products = []) {
 
 async function syncCategories() {
   logger.info('Starting category sync');
-  
+
   try {
     const mainGroups = await soapService.getProductGroups();
     const categoryOps = [];
-    
+
     for (const group of mainGroups) {
       categoryOps.push({
         updateOne: {
@@ -158,7 +158,7 @@ async function syncCategories() {
           upsert: true
         }
       });
-      
+
       try {
         const subGroups = await soapService.getSubGroups(group.grpkod);
         for (const subGroup of subGroups) {
@@ -179,7 +179,7 @@ async function syncCategories() {
               upsert: true
             }
           });
-          
+
           try {
             const subGroups2 = await soapService.getSubGroups2(subGroup.altgrpkod || subGroup.grpkod);
             for (const subGroup2 of subGroups2) {
@@ -209,15 +209,15 @@ async function syncCategories() {
         logger.warn(`Failed to fetch subgroups for ${group.grpkod}: ${error.message}`);
       }
     }
-    
+
     if (categoryOps.length > 0) {
       const result = await Category.bulkWrite(categoryOps, { ordered: false });
       logger.info(`Category sync completed: ${result.upsertedCount} inserted, ${result.modifiedCount} updated`);
       return { inserted: result.upsertedCount, updated: result.modifiedCount };
     }
-    
+
     return { inserted: 0, updated: 0 };
-    
+
   } catch (error) {
     logger.error('Category sync failed:', error);
     throw error;
@@ -226,10 +226,26 @@ async function syncCategories() {
 
 async function fullSync() {
   logger.info('Starting FULL sync');
-  
+
   const all = await fetchAllErpProducts();
   const productResult = await upsertProducts(all);
-  
+  const activeStockNumbers = all
+    .map(product => product?.stkno)
+    .filter(Boolean);
+
+  const deactivateResult = await Product.updateMany(
+    {
+      isActive: { $ne: false },
+      stkno: { $nin: activeStockNumbers }
+    },
+    {
+      $set: {
+        isActive: false,
+        syncedAt: new Date()
+      }
+    }
+  );
+
   let categoryResult = { inserted: 0, updated: 0 };
   try {
     categoryResult = await syncCategories();
@@ -238,31 +254,36 @@ async function fullSync() {
       error: catError.message
     });
   }
-  
+
   await SyncCursor.updateOne(
     { key: 'products' },
-    { 
-      $set: { 
+    {
+      $set: {
         lastSuccessfulSyncAt: new Date(),
         lastSyncMode: 'full'
-      } 
+      }
     },
     { upsert: true }
   );
-  
-  logger.info(`FULL sync completed | products: ${all.length} (${productResult.inserted}+${productResult.updated}) | categories: ${categoryResult.inserted}+${categoryResult.updated}`);
-  return { 
-    products: { total: all.length, ...productResult },
+
+  logger.info(`FULL sync completed | products: ${all.length} (${productResult.inserted}+${productResult.updated}) | deactivated: ${deactivateResult.modifiedCount || 0} | categories: ${categoryResult.inserted}+${categoryResult.updated}`);
+  return {
+    products: {
+      total: all.length,
+      deactivated: deactivateResult.modifiedCount || 0,
+      ...productResult
+    },
     categories: categoryResult
   };
 }
 
+
 async function deltaSync() {
   logger.info('Starting DELTA sync');
-  
+
   const all = await fetchAllErpProducts();
   const productResult = await upsertProducts(all);
-  
+
   let categoryResult = { inserted: 0, updated: 0 };
   try {
     categoryResult = await syncCategories();
@@ -274,17 +295,17 @@ async function deltaSync() {
 
   await SyncCursor.updateOne(
     { key: 'products' },
-    { 
-      $set: { 
+    {
+      $set: {
         lastSuccessfulSyncAt: new Date(),
         lastSyncMode: 'delta'
-      } 
+      }
     },
     { upsert: true }
   );
-  
+
   logger.info(`DELTA sync completed | products: ${all.length} (${productResult.inserted}+${productResult.updated}) | categories: ${categoryResult.inserted}+${categoryResult.updated}`);
-  return { 
+  return {
     products: { fetched: all.length, ...productResult },
     categories: categoryResult
   };
